@@ -41,7 +41,9 @@ unsigned long lastUpdateMillis = 0;   // Last display update
 // Example: if your clock loses 10 seconds per day:
 //   10 sec / 86400 sec * 1000000 = ~116 PPM (set negative to speed up)
 // Adjust this value based on your specific Arduino Nano's crystal
-const long CRYSTAL_PPM_CORRECTION = 0;  // Adjust this! Typical range: -200 to +200
+// Measured: Arduino shows 1h 0m 4s when actual time is 1h (gains 4 seconds per hour)
+// Calculation: 4/3600 * 1000000 = ~1111 PPM (positive because clock runs fast)
+const long CRYSTAL_PPM_CORRECTION = 1111;  // Adjust this! Typical range: -200 to +200
 
 // High-precision timing using accumulated microseconds
 unsigned long lastMicros = 0;
