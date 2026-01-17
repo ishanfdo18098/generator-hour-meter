@@ -9,8 +9,13 @@
   Saves total time to EEPROM every minute to preserve data across power cycles.
   
   Hardware:
-    - Arduino UNO
+    - Arduino Nano
     - 1602A LCD (I2C or parallel)
+    
+  Crystal Calibration:
+    - Adjust CRYSTAL_PPM_CORRECTION to compensate for crystal inaccuracy
+    - Positive value = crystal runs fast, negative = crystal runs slow
+    - Measure by comparing to accurate time source over 24+ hours
 */
 
 #include <LiquidCrystal.h>
@@ -22,12 +27,29 @@ LiquidCrystal lcd(12, 11, 5, 4, 3, 2);
 // EEPROM addresses for storing total time
 const int EEPROM_HOURS_ADDR = 0;    // 2 bytes for hours (0-1)
 const int EEPROM_MINUTES_ADDR = 2;  // 1 byte for minutes
+const int EEPROM_SECONDS_ADDR = 3;  // 1 byte for seconds
 
 // Time tracking variables
-unsigned long totalMinutes = 0;      // Total accumulated minutes from EEPROM
+unsigned long totalSeconds = 0;       // Total accumulated seconds from EEPROM
 unsigned long sessionStartMillis = 0; // When this session started
-unsigned long lastSaveMillis = 0;    // Last time we saved to EEPROM
-unsigned long lastUpdateMillis = 0;  // Last display update
+unsigned long lastSaveMillis = 0;     // Last time we saved to EEPROM
+unsigned long lastUpdateMillis = 0;   // Last display update
+
+// Crystal calibration - Parts Per Million correction
+// Example: if your clock gains 5 seconds per day:
+//   5 sec / 86400 sec * 1000000 = ~58 PPM (set positive to slow down)
+// Example: if your clock loses 10 seconds per day:
+//   10 sec / 86400 sec * 1000000 = ~116 PPM (set negative to speed up)
+// Adjust this value based on your specific Arduino Nano's crystal
+const long CRYSTAL_PPM_CORRECTION = 0;  // Adjust this! Typical range: -200 to +200
+
+// High-precision timing using accumulated microseconds
+unsigned long lastMicros = 0;
+unsigned long accumulatedMicros = 0;
+unsigned long correctedSessionSeconds = 0;
+
+// Correction accumulator (in parts per billion for precision)
+long correctionAccumulator = 0;
 
 const unsigned long SAVE_INTERVAL = 60000;   // Save to EEPROM every 1 minute (60000 ms)
 const unsigned long UPDATE_INTERVAL = 1000;  // Update display every 1 second
@@ -44,6 +66,7 @@ void setup() {
   sessionStartMillis = millis();
   lastSaveMillis = millis();
   lastUpdateMillis = millis();
+  lastMicros = micros();
   
   // Initial display
   updateDisplay();
@@ -54,10 +77,52 @@ void setup() {
 
 void loop() {
   unsigned long currentMillis = millis();
+  unsigned long currentMicros = micros();
   
-  // Update display every second
-  if (currentMillis - lastUpdateMillis >= UPDATE_INTERVAL) {
-    lastUpdateMillis = currentMillis;
+  // High-precision time tracking using micros() for better accuracy
+  // Handle micros() overflow (occurs every ~70 minutes)
+  unsigned long elapsedMicros;
+  if (currentMicros >= lastMicros) {
+    elapsedMicros = currentMicros - lastMicros;
+  } else {
+    // Overflow occurred
+    elapsedMicros = (0xFFFFFFFF - lastMicros) + currentMicros + 1;
+  }
+  
+  if (elapsedMicros >= 1000) {  // Process at least 1ms worth
+    lastMicros = currentMicros;
+    
+    // Apply PPM correction
+    // For every 1,000,000 microseconds, adjust by CRYSTAL_PPM_CORRECTION microseconds
+    // We accumulate in parts per billion for precision
+    correctionAccumulator += (long)elapsedMicros * CRYSTAL_PPM_CORRECTION;
+    
+    // Extract whole microseconds of correction
+    long correctionMicros = correctionAccumulator / 1000000L;
+    correctionAccumulator -= correctionMicros * 1000000L;
+    
+    // Apply correction (subtract if crystal is fast, add if slow)
+    long correctedElapsed = (long)elapsedMicros - correctionMicros;
+    if (correctedElapsed > 0) {
+      accumulatedMicros += correctedElapsed;
+    }
+    
+    // Convert accumulated microseconds to seconds
+    while (accumulatedMicros >= 1000000UL) {
+      accumulatedMicros -= 1000000UL;
+      correctedSessionSeconds++;
+    }
+  }
+  
+  // Update display every second using delta timing for accuracy
+  unsigned long elapsed = currentMillis - lastUpdateMillis;
+  if (elapsed >= UPDATE_INTERVAL) {
+    // Account for any drift by tracking exact elapsed time
+    lastUpdateMillis += UPDATE_INTERVAL;
+    // If we've fallen behind significantly, reset to avoid catching up forever
+    if (currentMillis - lastUpdateMillis > UPDATE_INTERVAL * 10) {
+      lastUpdateMillis = currentMillis;
+    }
     updateDisplay();
   }
   
@@ -69,13 +134,13 @@ void loop() {
 }
 
 void updateDisplay() {
-  // Calculate current session time
-  unsigned long sessionMillis = millis() - sessionStartMillis;
-  unsigned long sessionSeconds = sessionMillis / 1000;
+  // Use corrected session seconds for accurate time display
+  unsigned long sessionSeconds = correctedSessionSeconds;
   unsigned long sessionMinutes = sessionSeconds / 60;
   
-  // Calculate total time (stored + current session)
-  unsigned long currentTotalMinutes = totalMinutes + sessionMinutes;
+  // Calculate total time (stored + current session) in seconds for precision
+  unsigned long currentTotalSeconds = totalSeconds + sessionSeconds;
+  unsigned long currentTotalMinutes = currentTotalSeconds / 60;
   
   // Convert to hours and minutes
   unsigned int totalHours = currentTotalMinutes / 60;
@@ -113,44 +178,52 @@ void updateDisplay() {
 }
 
 void loadTotalTime() {
-  // Read hours (2 bytes) and minutes (1 byte) from EEPROM
+  // Read hours (2 bytes), minutes (1 byte), and seconds (1 byte) from EEPROM
   unsigned int hours = (EEPROM.read(EEPROM_HOURS_ADDR) << 8) | EEPROM.read(EEPROM_HOURS_ADDR + 1);
   byte minutes = EEPROM.read(EEPROM_MINUTES_ADDR);
+  byte seconds = EEPROM.read(EEPROM_SECONDS_ADDR);
   
   // Check for uninitialized EEPROM (0xFF values)
   if (hours == 0xFFFF) hours = 0;
   if (minutes == 0xFF || minutes >= 60) minutes = 0;
+  if (seconds == 0xFF || seconds >= 60) seconds = 0;
   
-  totalMinutes = (unsigned long)hours * 60 + minutes;
+  totalSeconds = (unsigned long)hours * 3600UL + (unsigned long)minutes * 60UL + seconds;
 }
 
 void saveTotalTime() {
-  // Calculate current total minutes
-  unsigned long sessionMillis = millis() - sessionStartMillis;
-  unsigned long sessionMinutes = sessionMillis / 60000;
-  unsigned long currentTotalMinutes = totalMinutes + sessionMinutes;
+  // Use corrected session seconds for accurate saving
+  unsigned long sessionSeconds = correctedSessionSeconds;
+  unsigned long currentTotalSeconds = totalSeconds + sessionSeconds;
   
-  // Convert to hours and minutes
-  unsigned int hours = currentTotalMinutes / 60;
-  byte minutes = currentTotalMinutes % 60;
+  // Convert to hours, minutes, and seconds
+  unsigned int hours = currentTotalSeconds / 3600UL;
+  byte minutes = (currentTotalSeconds % 3600UL) / 60;
+  byte seconds = currentTotalSeconds % 60;
   
   // Write to EEPROM (only if changed to reduce wear)
   EEPROM.update(EEPROM_HOURS_ADDR, (hours >> 8) & 0xFF);
   EEPROM.update(EEPROM_HOURS_ADDR + 1, hours & 0xFF);
   EEPROM.update(EEPROM_MINUTES_ADDR, minutes);
+  EEPROM.update(EEPROM_SECONDS_ADDR, seconds);
 }
 
 void setTotalHours(unsigned int newHours, byte newMinutes) {
-  // Update the in-memory total minutes
-  totalMinutes = (unsigned long)newHours * 60 + newMinutes;
+  // Update the in-memory total seconds
+  totalSeconds = (unsigned long)newHours * 3600UL + (unsigned long)newMinutes * 60UL;
   
-  // Reset session start to now so session time doesn't add to the new value incorrectly
+  // Reset session tracking
   sessionStartMillis = millis();
+  lastMicros = micros();
+  accumulatedMicros = 0;
+  correctedSessionSeconds = 0;
+  correctionAccumulator = 0;
   
   // Write to EEPROM immediately
   EEPROM.update(EEPROM_HOURS_ADDR, (newHours >> 8) & 0xFF);
   EEPROM.update(EEPROM_HOURS_ADDR + 1, newHours & 0xFF);
   EEPROM.update(EEPROM_MINUTES_ADDR, newMinutes);
+  EEPROM.update(EEPROM_SECONDS_ADDR, 0);
   
   // Update display to reflect new value
   updateDisplay();
