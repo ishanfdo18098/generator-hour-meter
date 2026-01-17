@@ -3,7 +3,8 @@
   
   Tracks total runtime hours of a generator using Arduino's internal clock.
   Displays on a 1602A LCD:
-    - Total runtime (hours and minutes)
+    - Total runtime (hours and minutes) - alternates with previous session
+    - Previous session runtime (hours and minutes)
     - Current session runtime (hours, minutes, and seconds)
   
   Saves total time to EEPROM every minute to preserve data across power cycles.
@@ -28,12 +29,23 @@ LiquidCrystal lcd(12, 11, 5, 4, 3, 2);
 const int EEPROM_HOURS_ADDR = 0;    // 2 bytes for hours (0-1)
 const int EEPROM_MINUTES_ADDR = 2;  // 1 byte for minutes
 const int EEPROM_SECONDS_ADDR = 3;  // 1 byte for seconds
+const int EEPROM_PREV_HOURS_ADDR = 4;    // 2 bytes for previous session hours
+const int EEPROM_PREV_MINUTES_ADDR = 6;  // 1 byte for previous session minutes
+const int EEPROM_PREV_SECONDS_ADDR = 7;  // 1 byte for previous session seconds
 
 // Time tracking variables
 unsigned long totalSeconds = 0;       // Total accumulated seconds from EEPROM
 unsigned long sessionStartMillis = 0; // When this session started
 unsigned long lastSaveMillis = 0;     // Last time we saved to EEPROM
 unsigned long lastUpdateMillis = 0;   // Last display update
+
+// Previous session tracking (loaded at startup, represents last power cycle's session)
+unsigned long prevSessionSeconds = 0;
+
+// Display alternation
+bool showTotal = true;                // Toggle between total and previous session
+unsigned long lastAlternateMillis = 0;
+const unsigned long ALTERNATE_INTERVAL = 3000;  // Alternate every 3 seconds
 
 // Crystal calibration - Parts Per Million correction
 // Example: if your clock gains 5 seconds per day:
@@ -61,13 +73,19 @@ void setup() {
   lcd.begin(16, 2);
   lcd.clear();
   
-  // Load total time from EEPROM
+  // Load total time and previous session from EEPROM
   loadTotalTime();
+  loadPrevSession();
+  
+  // Save current session (0 at startup) as the new "previous session" for next power cycle
+  // This will be updated continuously as the session progresses
+  savePrevSession();
   
   // Record session start time
   sessionStartMillis = millis();
   lastSaveMillis = millis();
   lastUpdateMillis = millis();
+  lastAlternateMillis = millis();
   lastMicros = micros();
   
   // Initial display
@@ -116,6 +134,13 @@ void loop() {
     }
   }
   
+  // Alternate display every ALTERNATE_INTERVAL
+  if (currentMillis - lastAlternateMillis >= ALTERNATE_INTERVAL) {
+    lastAlternateMillis = currentMillis;
+    showTotal = !showTotal;
+    updateDisplay();  // Force immediate update on toggle
+  }
+  
   // Update display every second using delta timing for accuracy
   unsigned long elapsed = currentMillis - lastUpdateMillis;
   if (elapsed >= UPDATE_INTERVAL) {
@@ -132,6 +157,7 @@ void loop() {
   if (currentMillis - lastSaveMillis >= SAVE_INTERVAL) {
     lastSaveMillis = currentMillis;
     saveTotalTime();
+    saveCurrentSessionAsPrev();  // Update previous session with current session time
   }
 }
 
@@ -152,17 +178,33 @@ void updateDisplay() {
   unsigned int sessionMins = sessionMinutes % 60;
   unsigned int sessionSecs = sessionSeconds % 60;
   
-  // Display total time on first row
+  // Previous session hours and minutes
+  unsigned int prevHours = prevSessionSeconds / 3600;
+  unsigned int prevMins = (prevSessionSeconds % 3600) / 60;
+  
+  // Display first row - alternate between total and previous session
   lcd.setCursor(0, 0);
-  lcd.print("Total: ");
-  if (totalHours < 10) lcd.print(" ");
-  if (totalHours < 100) lcd.print(" ");
-  if (totalHours < 1000) lcd.print(" ");
-  lcd.print(totalHours);
-  lcd.print("h ");
-  if (totalMins < 10) lcd.print("0");
-  lcd.print(totalMins);
-  lcd.print("m");
+  if (showTotal) {
+    lcd.print("Total: ");
+    if (totalHours < 10) lcd.print(" ");
+    if (totalHours < 100) lcd.print(" ");
+    if (totalHours < 1000) lcd.print(" ");
+    lcd.print(totalHours);
+    lcd.print("h ");
+    if (totalMins < 10) lcd.print("0");
+    lcd.print(totalMins);
+    lcd.print("m");
+  } else {
+    lcd.print("Prev:  ");
+    if (prevHours < 10) lcd.print(" ");
+    if (prevHours < 100) lcd.print(" ");
+    if (prevHours < 1000) lcd.print(" ");
+    lcd.print(prevHours);
+    lcd.print("h ");
+    if (prevMins < 10) lcd.print("0");
+    lcd.print(prevMins);
+    lcd.print("m");
+  }
   
   // Display session time on second row (with seconds)
   lcd.setCursor(0, 1);
@@ -191,6 +233,51 @@ void loadTotalTime() {
   if (seconds == 0xFF || seconds >= 60) seconds = 0;
   
   totalSeconds = (unsigned long)hours * 3600UL + (unsigned long)minutes * 60UL + seconds;
+}
+
+void loadPrevSession() {
+  // Read previous session hours (2 bytes), minutes (1 byte), and seconds (1 byte) from EEPROM
+  unsigned int hours = (EEPROM.read(EEPROM_PREV_HOURS_ADDR) << 8) | EEPROM.read(EEPROM_PREV_HOURS_ADDR + 1);
+  byte minutes = EEPROM.read(EEPROM_PREV_MINUTES_ADDR);
+  byte seconds = EEPROM.read(EEPROM_PREV_SECONDS_ADDR);
+  
+  // Check for uninitialized EEPROM (0xFF values)
+  if (hours == 0xFFFF) hours = 0;
+  if (minutes == 0xFF || minutes >= 60) minutes = 0;
+  if (seconds == 0xFF || seconds >= 60) seconds = 0;
+  
+  prevSessionSeconds = (unsigned long)hours * 3600UL + (unsigned long)minutes * 60UL + seconds;
+}
+
+void savePrevSession() {
+  // Save the loaded previous session value (from last power cycle)
+  // This is called at startup to preserve the previous session
+  unsigned int hours = prevSessionSeconds / 3600UL;
+  byte minutes = (prevSessionSeconds % 3600UL) / 60;
+  byte seconds = prevSessionSeconds % 60;
+  
+  // Write to EEPROM
+  EEPROM.update(EEPROM_PREV_HOURS_ADDR, (hours >> 8) & 0xFF);
+  EEPROM.update(EEPROM_PREV_HOURS_ADDR + 1, hours & 0xFF);
+  EEPROM.update(EEPROM_PREV_MINUTES_ADDR, minutes);
+  EEPROM.update(EEPROM_PREV_SECONDS_ADDR, seconds);
+}
+
+void saveCurrentSessionAsPrev() {
+  // Save current session time to EEPROM as the "previous session"
+  // This will be loaded on next power-up
+  unsigned long sessionSeconds = correctedSessionSeconds;
+  
+  // Convert to hours, minutes, and seconds
+  unsigned int hours = sessionSeconds / 3600UL;
+  byte minutes = (sessionSeconds % 3600UL) / 60;
+  byte seconds = sessionSeconds % 60;
+  
+  // Write to EEPROM
+  EEPROM.update(EEPROM_PREV_HOURS_ADDR, (hours >> 8) & 0xFF);
+  EEPROM.update(EEPROM_PREV_HOURS_ADDR + 1, hours & 0xFF);
+  EEPROM.update(EEPROM_PREV_MINUTES_ADDR, minutes);
+  EEPROM.update(EEPROM_PREV_SECONDS_ADDR, seconds);
 }
 
 void saveTotalTime() {
