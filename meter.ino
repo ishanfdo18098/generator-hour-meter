@@ -178,9 +178,11 @@ void updateDisplay() {
   unsigned int sessionMins = sessionMinutes % 60;
   unsigned int sessionSecs = sessionSeconds % 60;
   
-  // Previous session hours and minutes
-  unsigned int prevHours = prevSessionSeconds / 3600;
-  unsigned int prevMins = (prevSessionSeconds % 3600) / 60;
+  // Previous session hours and minutes (with rounding)
+  // Add 30 seconds before dividing to round to nearest minute
+  unsigned long prevRoundedMinutes = (prevSessionSeconds + 30) / 60;
+  unsigned int prevHours = prevRoundedMinutes / 60;
+  unsigned int prevMins = prevRoundedMinutes % 60;
   
   // Display first row - alternate between total and previous session
   lcd.setCursor(0, 0);
